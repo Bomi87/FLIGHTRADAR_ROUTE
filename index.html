@@ -238,7 +238,7 @@
 
         <div class="muted">
           1차 Route를 SkyVector에 Overlay한 뒤, SkyVector GPX RAW를 아래에 붙여넣으세요.
-          GPX 경로에서 너무 멀리 벗어난 waypoint만 제거합니다.
+          GPX 경로에서 너무 멀리 벗어난 waypoint만 브라우저에서 바로 제거합니다.
         </div>
 
         <div class="sp"></div>
@@ -505,7 +505,7 @@
     });
 
 
-    $('refineBtn').addEventListener('click', async () => {
+    $('refineBtn').addEventListener('click', () => {
       const btn = $('refineBtn');
 
       try {
@@ -524,65 +524,49 @@
         $('refineStatus').textContent =
           '1차 Route와 SkyVector GPX를 비교해 튀는 waypoint 제거 중...';
 
-        const payload = {
-          action:'refineRoute',
-          gpxCorridorNm,
-          routeWaypoints:firstPassResult.waypoints.map(x => ({
-            identifier:x.identifier,
-            region:x.region || '',
-            slug:x.slug || '',
-            lat:x.lat,
-            lon:x.lon,
-            crossTrackNm:x.crossTrackNm,
-            alongTrackNm:x.alongTrackNm
-          })),
-          referenceRoute:parsedGpx.map(p => ({
-            name:p.name,
-            lat:p.lat,
-            lon:p.lon
-          }))
-        };
+        const preparedGpx = preparePolyline(parsedGpx);
 
-        const requestUrl =
-          BACKEND_URL + '?_=' + Date.now();
+        const kept = [];
+        const removed = [];
 
-        const res = await fetch(requestUrl, {
-          method:'POST',
-          headers:{
-            'Content-Type':'text/plain;charset=utf-8'
-          },
-          body:JSON.stringify(payload),
-          cache:'no-store'
+        firstPassResult.waypoints.forEach(wp => {
+          const match =
+            nearestPointOnPolyline(
+              wp,
+              parsedGpx,
+              preparedGpx.cumulativeNm
+            );
+
+          if (match && match.distanceNm <= gpxCorridorNm) {
+            kept.push({
+              ...wp,
+              gpxDistanceNm: match.distanceNm,
+              alongTrackNm: match.alongTrackNm
+            });
+          } else {
+            removed.push({
+              identifier: wp.identifier,
+              gpxDistanceNm: match ? match.distanceNm : null
+            });
+          }
         });
 
-        const raw = await res.text();
+        kept.sort((a,b) => a.alongTrackNm - b.alongTrackNm);
 
-        let data;
-        try {
-          data = JSON.parse(raw);
-        } catch (_) {
-          throw new Error(
-            '백엔드가 JSON이 아닌 응답을 반환했습니다.\n' +
-            raw.slice(0,500)
-          );
-        }
+        const refinedResult = {
+          ...firstPassResult,
+          waypoints: kept,
+          removed,
+          removedCount: removed.length,
+          originalCount: firstPassResult.waypoints.length,
+          gpxCorridorNm
+        };
 
-        if (!data.ok) {
-          throw new Error(data.error || 'Backend error');
-        }
-
-        if (!data.result || !Array.isArray(data.result.waypoints)) {
-          throw new Error(
-            '2차 보정 결과 형식이 올바르지 않습니다: ' +
-            JSON.stringify(data).slice(0,500)
-          );
-        }
-
-        renderResult(data.result, '2차 보정 Route');
+        renderResult(refinedResult, '2차 보정 Route');
 
         $('refineStatus').className = 'status ok';
         $('refineStatus').textContent =
-          `2차 보정 완료 · ${data.result.removedCount || 0}개 waypoint 제거`;
+          `2차 보정 완료 · ${removed.length}개 waypoint 제거`;
 
       } catch (err) {
         $('refineStatus').className = 'status err';
@@ -592,6 +576,7 @@
         btn.disabled = false;
       }
     });
+
 
     $('copyBtn').addEventListener('click', async () => {
       try {
@@ -844,6 +829,98 @@
       while(d < -180) d += 360;
       return d;
     }
+
+    function preparePolyline(points) {
+      const cumulativeNm = [0];
+      let totalDistanceNm = 0;
+
+      for (let i=1; i<points.length; i++) {
+        totalDistanceNm += distanceNm(points[i-1], points[i]);
+        cumulativeNm.push(totalDistanceNm);
+      }
+
+      return {
+        cumulativeNm,
+        totalDistanceNm
+      };
+    }
+
+    function nearestPointOnPolyline(point, route, cumulativeNm) {
+      let best = null;
+
+      for (let i=0; i<route.length-1; i++) {
+        const m =
+          pointToSegmentNm(
+            point,
+            route[i],
+            route[i+1]
+          );
+
+        if (!best || m.distanceNm < best.distanceNm) {
+          const legNm =
+            cumulativeNm[i+1] -
+            cumulativeNm[i];
+
+          best = {
+            distanceNm:m.distanceNm,
+            alongTrackNm:
+              cumulativeNm[i] +
+              legNm * m.fraction,
+            segmentIndex:i
+          };
+        }
+      }
+
+      return best;
+    }
+
+    function pointToSegmentNm(p,a,b) {
+      const meanLat =
+        (
+          Number(a.lat) +
+          Number(b.lat) +
+          Number(p.lat)
+        ) / 3 * Math.PI / 180;
+
+      const lonB =
+        shortestLonDelta(a.lon,b.lon);
+
+      const lonP =
+        shortestLonDelta(a.lon,p.lon);
+
+      const x2 =
+        lonB * 60 * Math.cos(meanLat);
+
+      const y2 =
+        (Number(b.lat)-Number(a.lat)) * 60;
+
+      const xp =
+        lonP * 60 * Math.cos(meanLat);
+
+      const yp =
+        (Number(p.lat)-Number(a.lat)) * 60;
+
+      const vv = x2*x2 + y2*y2;
+
+      let t =
+        vv > 1e-12
+          ? (xp*x2 + yp*y2) / vv
+          : 0;
+
+      t = Math.max(0,Math.min(1,t));
+
+      const cx = t*x2;
+      const cy = t*y2;
+
+      const dx = xp-cx;
+      const dy = yp-cy;
+
+      return {
+        distanceNm:Math.sqrt(dx*dx + dy*dy),
+        fraction:t
+      };
+    }
+
 
     function numberValue(id) {
       const n = Number($(id).value);
