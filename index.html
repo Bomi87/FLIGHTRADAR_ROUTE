@@ -384,11 +384,27 @@
           );
         }
 
-        if (!data.ok) {
-          throw new Error(data.error || 'Backend error');
-        }
+if (!data.ok) {
+  throw new Error(data.error || 'Backend error');
+}
 
-        renderResult(data.result);
+console.log('Backend response:', data);
+
+if (!data.result) {
+  throw new Error(
+    '백엔드 응답에 result가 없습니다: ' +
+    JSON.stringify(data).slice(0,500)
+  );
+}
+
+if (!Array.isArray(data.result.waypoints)) {
+  throw new Error(
+    '백엔드 응답에 waypoints 배열이 없습니다: ' +
+    JSON.stringify(data.result).slice(0,500)
+  );
+}
+
+renderResult(data.result);
 
         $('runStatus').className = 'status ok';
         $('runStatus').textContent = 'Route 추출 완료.';
