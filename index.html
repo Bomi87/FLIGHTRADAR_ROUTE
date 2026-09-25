@@ -1,0 +1,633 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Track → Waypoint Route</title>
+
+  <style>
+    :root{
+      --bg:#0b1020;
+      --panel:#121a2d;
+      --line:#273454;
+      --text:#eef3ff;
+      --muted:#9fb0d0;
+      --accent:#2f78db;
+      --good:#67d391;
+      --bad:#ff8c8c;
+    }
+
+    *{box-sizing:border-box}
+
+    body{
+      margin:0;
+      background:var(--bg);
+      color:var(--text);
+      font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+    }
+
+    .wrap{
+      max-width:1050px;
+      margin:0 auto;
+      padding:24px;
+    }
+
+    h1{margin:0 0 6px;font-size:25px}
+    h2{margin:0 0 14px;font-size:17px}
+
+    .muted{color:var(--muted);font-size:13px}
+
+    .grid{
+      display:grid;
+      grid-template-columns:1fr 1fr;
+      gap:18px;
+      margin-top:18px;
+    }
+
+    .card{
+      padding:16px;
+      background:var(--panel);
+      border:1px solid var(--line);
+      border-radius:16px;
+    }
+
+    .row{
+      display:grid;
+      grid-template-columns:1fr 1fr;
+      gap:12px;
+    }
+
+    .sp{height:12px}
+
+    label{
+      display:block;
+      margin-bottom:6px;
+      color:var(--muted);
+      font-size:12px;
+    }
+
+    input,button,select{
+      width:100%;
+      border:1px solid var(--line);
+      border-radius:10px;
+      background:#0d1426;
+      color:var(--text);
+      padding:10px;
+      font:inherit;
+    }
+
+    input[type=file]{padding:8px}
+
+    button{
+      cursor:pointer;
+      background:#1d5fbf;
+      border-color:var(--accent);
+      font-weight:700;
+    }
+
+    button.secondary{
+      background:#18233d;
+      border-color:var(--line);
+    }
+
+    button:disabled{
+      opacity:.55;
+      cursor:not-allowed;
+    }
+
+    .status{
+      margin-top:12px;
+      font-size:13px;
+      white-space:pre-wrap;
+    }
+
+    .ok{color:var(--good)}
+    .err{color:var(--bad)}
+
+    .route{
+      border:1px solid var(--line);
+      border-radius:12px;
+      background:#0d1426;
+      padding:14px;
+      min-height:90px;
+      line-height:1.7;
+      word-break:break-word;
+    }
+
+    .meta{
+      margin-top:12px;
+      display:grid;
+      grid-template-columns:repeat(3,1fr);
+      gap:10px;
+    }
+
+    .meta-box{
+      padding:10px;
+      background:#0d1426;
+      border:1px solid var(--line);
+      border-radius:10px;
+    }
+
+    .meta-label{
+      color:var(--muted);
+      font-size:11px;
+      margin-bottom:4px;
+    }
+
+    .meta-value{
+      font-size:15px;
+      font-weight:700;
+    }
+
+    table{
+      width:100%;
+      border-collapse:collapse;
+      margin-top:12px;
+      font-size:12px;
+    }
+
+    th,td{
+      border-bottom:1px solid var(--line);
+      padding:8px 6px;
+      text-align:left;
+    }
+
+    th{color:var(--muted);font-weight:600}
+
+    @media(max-width:800px){
+      .grid,.row,.meta{grid-template-columns:1fr}
+    }
+  </style>
+</head>
+
+<body>
+  <div class="wrap">
+      <h1>Track → Waypoint Route</h1>
+      <div class="muted">
+        ADS-B/실제 항적 CSV를 기준으로 가까운 ENROUTE waypoint를 순서대로 추정합니다.
+      </div>
+
+      <div class="grid">
+        <section class="card">
+          <h2>1. Track CSV</h2>
+
+          <label for="trackFile">CSV 파일</label>
+          <input id="trackFile" type="file" accept=".csv,text/csv">
+
+          <div class="sp"></div>
+
+          <div class="muted">
+            지원 형식: Timestamp, UTC, Callsign, Position, Altitude, Speed, Direction<br>
+            Position 예: "37.462006,126.438744"
+          </div>
+
+          <div id="fileStatus" class="status muted"></div>
+        </section>
+
+        <section class="card">
+          <h2>2. 추출 조건</h2>
+
+          <div class="row">
+            <div>
+              <label for="maxDistance">Track ↔ waypoint 최대거리 (NM)</label>
+              <input id="maxDistance" type="number" value="12" min="2" max="50" step="1">
+            </div>
+
+            <div>
+              <label for="minSpacing">Waypoint 최소 간격 (NM)</label>
+              <input id="minSpacing" type="number" value="20" min="5" max="100" step="5">
+            </div>
+          </div>
+
+          <div class="sp"></div>
+
+          <div class="row">
+            <div>
+              <label for="minAltitude">최소 고도 (ft)</label>
+              <input id="minAltitude" type="number" value="18000" min="0" max="50000" step="1000">
+            </div>
+
+            <div>
+              <label for="sampleSpacing">Track 샘플 간격 (NM)</label>
+              <input id="sampleSpacing" type="number" value="5" min="1" max="30" step="1">
+            </div>
+          </div>
+
+          <div class="sp"></div>
+
+          <button id="runBtn" type="button">Waypoint Route 추출</button>
+
+          <div id="runStatus" class="status muted"></div>
+        </section>
+      </div>
+
+      <div class="sp"></div>
+
+      <section class="card" id="resultCard" hidden>
+        <h2>3. 추정 Route</h2>
+
+        <div id="routeText" class="route">-</div>
+
+        <div class="meta">
+          <div class="meta-box">
+            <div class="meta-label">선택된 waypoint</div>
+            <div class="meta-value" id="fixCount">-</div>
+          </div>
+
+          <div class="meta-box">
+            <div class="meta-label">분석 Track 거리</div>
+            <div class="meta-value" id="trackDistance">-</div>
+          </div>
+
+          <div class="meta-box">
+            <div class="meta-label">평균 Track 거리</div>
+            <div class="meta-value" id="avgDistance">-</div>
+          </div>
+        </div>
+
+        <div class="sp"></div>
+
+        <button id="copyBtn" type="button" class="secondary">Route 복사</button>
+
+        <table id="detailTable">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Waypoint</th>
+              <th>Region</th>
+              <th>Track 거리</th>
+              <th>Along Track</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+
+        <div class="sp"></div>
+        <div class="muted">
+          Waypoint data: whatisflying-db · ODbL 1.0
+        </div>
+      </section>
+  </div>
+
+  <script>
+  (() => {
+    'use strict';
+
+    // Apps Script 웹앱 /exec URL로 변경하세요.
+    const BACKEND_URL = 'https://script.google.com/macros/s/AKfycbwsBbahld_s26PbbRtwNWnsmHgZt8phn34FJZ7KzfQlC8pby4Hmpa4Vex0Bapgd-ZdA/exec';
+
+    const $ = id => document.getElementById(id);
+
+    let parsedTrack = [];
+    let lastRouteText = '';
+
+    $('trackFile').addEventListener('change', async () => {
+      const file = $('trackFile').files?.[0];
+
+      $('fileStatus').className = 'status muted';
+      $('fileStatus').textContent = '';
+      parsedTrack = [];
+      $('resultCard').hidden = true;
+
+      if (!file) return;
+
+      try {
+        const text = await file.text();
+        parsedTrack = parseTrackCsv(text);
+
+        if (parsedTrack.length < 2) {
+          throw new Error('유효한 Track point가 2개 미만입니다.');
+        }
+
+        const callsign =
+          parsedTrack.find(p => p.callsign)?.callsign || '-';
+
+        $('fileStatus').className = 'status ok';
+        $('fileStatus').textContent =
+          `${parsedTrack.length.toLocaleString()}개 Track point 읽기 완료 · Callsign ${callsign}`;
+
+      } catch (err) {
+        $('fileStatus').className = 'status err';
+        $('fileStatus').textContent = err.message;
+      }
+    });
+
+    $('runBtn').addEventListener('click', async () => {
+      const btn = $('runBtn');
+
+      try {
+        if (BACKEND_URL.includes('PASTE_YOUR_')) {
+          throw new Error('먼저 BACKEND_URL에 Apps Script /exec URL을 입력하세요.');
+        }
+
+        if (parsedTrack.length < 2) {
+          throw new Error('먼저 Track CSV를 선택하세요.');
+        }
+
+        const maxDistanceNm = numberValue('maxDistance');
+        const minSpacingNm = numberValue('minSpacing');
+        const minAltitudeFt = numberValue('minAltitude');
+        const sampleSpacingNm = numberValue('sampleSpacing');
+
+        btn.disabled = true;
+        $('runStatus').className = 'status muted';
+        $('runStatus').textContent =
+          'Track 정리 및 주변 ENROUTE waypoint 검색 중...';
+
+        // 브라우저에서 먼저 고도 필터 + 거리 샘플링.
+        const filtered =
+          parsedTrack.filter(p =>
+            Number.isFinite(p.lat) &&
+            Number.isFinite(p.lon) &&
+            (minAltitudeFt <= 0 ||
+             !Number.isFinite(p.altitude) ||
+             p.altitude >= minAltitudeFt)
+          );
+
+        if (filtered.length < 2) {
+          throw new Error(
+            '최소 고도 조건을 만족하는 Track point가 부족합니다. 최소 고도를 낮춰보세요.'
+          );
+        }
+
+        const sampled = resampleTrack(filtered, sampleSpacingNm);
+
+        const payload = {
+          action: 'inferRoute',
+          maxDistanceNm,
+          minSpacingNm,
+          sampleSpacingNm,
+          track: sampled.map(p => ({
+            lat:p.lat,
+            lon:p.lon,
+            altitude:p.altitude,
+            utc:p.utc
+          }))
+        };
+
+        const res = await fetch(BACKEND_URL, {
+          method:'POST',
+          headers:{'Content-Type':'text/plain;charset=utf-8'},
+          body:JSON.stringify(payload),
+          redirect:'follow'
+        });
+
+        const raw = await res.text();
+
+        let data;
+        try {
+          data = JSON.parse(raw);
+        } catch (_) {
+          throw new Error(
+            '백엔드가 JSON이 아닌 응답을 반환했습니다.\n' +
+            raw.slice(0,300)
+          );
+        }
+
+        if (!data.ok) {
+          throw new Error(data.error || 'Backend error');
+        }
+
+        renderResult(data.result);
+
+        $('runStatus').className = 'status ok';
+        $('runStatus').textContent = 'Route 추출 완료.';
+
+      } catch (err) {
+        $('runStatus').className = 'status err';
+        $('runStatus').textContent = err.message;
+
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    $('copyBtn').addEventListener('click', async () => {
+      try {
+        if (!lastRouteText) {
+          throw new Error('복사할 Route가 없습니다.');
+        }
+
+        await navigator.clipboard.writeText(lastRouteText);
+
+        $('runStatus').className = 'status ok';
+        $('runStatus').textContent = 'Route를 복사했습니다.';
+
+      } catch (err) {
+        $('runStatus').className = 'status err';
+        $('runStatus').textContent = '복사 실패: ' + err.message;
+      }
+    });
+
+    function renderResult(r) {
+      if (!r || !Array.isArray(r.waypoints)) {
+        throw new Error('백엔드 Route 결과 형식이 올바르지 않습니다.');
+      }
+
+      lastRouteText =
+        r.waypoints.map(x => x.identifier).join(' ');
+
+      $('routeText').textContent =
+        lastRouteText || '조건에 맞는 waypoint를 찾지 못했습니다.';
+
+      $('fixCount').textContent =
+        r.waypoints.length.toLocaleString();
+
+      $('trackDistance').textContent =
+        `${Number(r.trackDistanceNm || 0).toFixed(0)} NM`;
+
+      $('avgDistance').textContent =
+        r.waypoints.length
+          ? `${Number(r.avgCrossTrackNm || 0).toFixed(1)} NM`
+          : '-';
+
+      const tbody = $('detailTable').querySelector('tbody');
+      tbody.innerHTML = '';
+
+      r.waypoints.forEach((x, i) => {
+        const tr = document.createElement('tr');
+
+        tr.innerHTML =
+          `<td>${i+1}</td>` +
+          `<td>${escapeHtml(x.identifier)}</td>` +
+          `<td>${escapeHtml(x.region || '')}</td>` +
+          `<td>${Number(x.crossTrackNm).toFixed(1)} NM</td>` +
+          `<td>${Number(x.alongTrackNm).toFixed(0)} NM</td>`;
+
+        tbody.appendChild(tr);
+      });
+
+      $('resultCard').hidden = false;
+      $('resultCard').scrollIntoView({
+        behavior:'smooth',
+        block:'start'
+      });
+    }
+
+    function parseTrackCsv(text) {
+      const rows = parseCsv(text);
+
+      if (rows.length < 2) {
+        throw new Error('CSV 데이터가 없습니다.');
+      }
+
+      const header =
+        rows[0].map(x => String(x || '').trim().toLowerCase());
+
+      const idx = name => header.indexOf(name.toLowerCase());
+
+      const positionIdx = idx('position');
+      const altitudeIdx = idx('altitude');
+      const callsignIdx = idx('callsign');
+      const utcIdx = idx('utc');
+
+      if (positionIdx < 0) {
+        throw new Error('CSV에 Position 열이 없습니다.');
+      }
+
+      const result = [];
+
+      for (let i=1; i<rows.length; i++) {
+        const row = rows[i];
+        const pos = String(row[positionIdx] || '').trim();
+
+        if (!pos) continue;
+
+        const m = pos.match(
+          /^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*$/
+        );
+
+        if (!m) continue;
+
+        const lat = Number(m[1]);
+        const lon = Number(m[2]);
+
+        if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+
+        result.push({
+          lat,
+          lon,
+          altitude:
+            altitudeIdx >= 0 ? Number(row[altitudeIdx]) : NaN,
+          callsign:
+            callsignIdx >= 0 ? String(row[callsignIdx] || '').trim() : '',
+          utc:
+            utcIdx >= 0 ? String(row[utcIdx] || '').trim() : ''
+        });
+      }
+
+      return result;
+    }
+
+    function parseCsv(text) {
+      const rows = [];
+      let row = [];
+      let field = '';
+      let quoted = false;
+
+      for (let i=0; i<text.length; i++) {
+        const c = text[i];
+
+        if (quoted) {
+          if (c === '"') {
+            if (text[i+1] === '"') {
+              field += '"';
+              i++;
+            } else {
+              quoted = false;
+            }
+          } else {
+            field += c;
+          }
+        } else {
+          if (c === '"') {
+            quoted = true;
+          } else if (c === ',') {
+            row.push(field);
+            field = '';
+          } else if (c === '\n') {
+            row.push(field);
+            rows.push(row);
+            row = [];
+            field = '';
+          } else if (c !== '\r') {
+            field += c;
+          }
+        }
+      }
+
+      row.push(field);
+      if (row.length > 1 || String(row[0] || '').trim()) {
+        rows.push(row);
+      }
+
+      return rows;
+    }
+
+    function resampleTrack(points, spacingNm) {
+      if (points.length <= 2 || spacingNm <= 0) return points;
+
+      const out = [points[0]];
+      let last = points[0];
+
+      for (let i=1; i<points.length-1; i++) {
+        if (distanceNm(last, points[i]) >= spacingNm) {
+          out.push(points[i]);
+          last = points[i];
+        }
+      }
+
+      const final = points[points.length-1];
+
+      if (out[out.length-1] !== final) {
+        out.push(final);
+      }
+
+      return out;
+    }
+
+    function distanceNm(a,b) {
+      const R = 3440.065;
+      const r = x => x * Math.PI / 180;
+
+      const lat1 = r(a.lat);
+      const lat2 = r(b.lat);
+      const dLat = lat2-lat1;
+      const dLon = r(shortestLonDelta(a.lon,b.lon));
+
+      const h =
+        Math.sin(dLat/2)**2 +
+        Math.cos(lat1)*Math.cos(lat2)*Math.sin(dLon/2)**2;
+
+      return R * 2 * Math.atan2(Math.sqrt(h),Math.sqrt(1-h));
+    }
+
+    function shortestLonDelta(lon1,lon2) {
+      let d = Number(lon2)-Number(lon1);
+      while(d > 180) d -= 360;
+      while(d < -180) d += 360;
+      return d;
+    }
+
+    function numberValue(id) {
+      const n = Number($(id).value);
+      if (!Number.isFinite(n)) {
+        throw new Error(`${id} 값을 확인하세요.`);
+      }
+      return n;
+    }
+
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>'"]/g, c => ({
+        '&':'&amp;',
+        '<':'&lt;',
+        '>':'&gt;',
+        "'":'&#39;',
+        '"':'&quot;'
+      }[c]));
+    }
+
+  })();
+  </script>
+</body>
+</html>
