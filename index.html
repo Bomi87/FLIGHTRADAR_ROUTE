@@ -345,6 +345,100 @@
     let firstPassResult = null;
     let lastRouteText = '';
 
+    async function postJsonWithRetry(url, payload, options={}) {
+      const attempts = Number(options.attempts || 3);
+      const baseDelayMs = Number(options.baseDelayMs || 1200);
+
+      let lastError = null;
+
+      for (let attempt=1; attempt<=attempts; attempt++) {
+        try {
+          const requestUrl =
+            url + (url.includes('?') ? '&' : '?') + '_=' + Date.now();
+
+          const res = await fetch(requestUrl, {
+            method:'POST',
+            headers:{
+              'Content-Type':'text/plain;charset=utf-8'
+            },
+            body:JSON.stringify(payload),
+            cache:'no-store'
+          });
+
+          const raw = await res.text();
+
+          let data = null;
+
+          try {
+            data = JSON.parse(raw);
+          } catch (_) {
+            const looksLikeHtml =
+              /^\s*<!doctype html/i.test(raw) ||
+              /^\s*<html/i.test(raw);
+
+            const msg =
+              looksLikeHtml
+                ? 'Google Apps Script가 일시적으로 HTML 오류 페이지를 반환했습니다.'
+                : '백엔드가 JSON이 아닌 응답을 반환했습니다.';
+
+            lastError = new Error(
+              msg +
+              ` (시도 ${attempt}/${attempts})`
+            );
+
+            if (attempt < attempts) {
+              await sleep(baseDelayMs * attempt);
+              continue;
+            }
+
+            throw new Error(
+              msg + '\n' +
+              raw.slice(0,500)
+            );
+          }
+
+          if (data && data.handler === 'doGet') {
+            throw new Error(
+              'POST 요청이 doGet으로 처리되었습니다. ' +
+              'Apps Script 배포 URL(/exec)과 최신 배포 버전을 확인하세요.'
+            );
+          }
+
+          if (!data || !data.ok) {
+            const backendMessage =
+              data && data.error
+                ? data.error
+                : 'Backend error';
+
+            // 명확한 애플리케이션 오류는 재시도하지 않음.
+            throw new Error(backendMessage);
+          }
+
+          return data;
+
+        } catch (err) {
+          lastError = err;
+
+          const retryable =
+            /HTML 오류 페이지|Failed to fetch|NetworkError|Load failed/i
+              .test(String(err && err.message || err));
+
+          if (!retryable || attempt >= attempts) {
+            throw err;
+          }
+
+          await sleep(baseDelayMs * attempt);
+        }
+      }
+
+      throw lastError || new Error('Backend request failed');
+    }
+
+    function sleep(ms) {
+      return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+
     $('trackFile').addEventListener('change', async () => {
       const file = $('trackFile').files?.[0];
 
@@ -419,7 +513,7 @@
         btn.disabled = true;
         $('runStatus').className = 'status muted';
         $('runStatus').textContent =
-          'Track 정리 및 주변 ENROUTE waypoint 검색 중...';
+          'Track 정리 및 주변 ENROUTE waypoint 검색 중...\n일시적인 Google 응답 오류는 최대 3회 자동 재시도합니다.';
 
         // 브라우저에서 먼저 고도 필터 + 거리 샘플링.
         const filtered =
@@ -452,48 +546,17 @@
           }))
         };
 
-        const requestUrl =
-          BACKEND_URL + '?_=' + Date.now();
-
-        const res = await fetch(requestUrl, {
-          method:'POST',
-          headers:{
-            'Content-Type':'text/plain;charset=utf-8'
-          },
-          body:JSON.stringify(payload),
-          cache:'no-store'
-        });
-
-        const raw = await res.text();
-
-        let data;
-        try {
-          data = JSON.parse(raw);
-        } catch (_) {
-          throw new Error(
-            '백엔드가 JSON이 아닌 응답을 반환했습니다.\n' +
-            raw.slice(0,500)
+        const data =
+          await postJsonWithRetry(
+            BACKEND_URL,
+            payload,
+            {
+              attempts:3,
+              baseDelayMs:1200
+            }
           );
-        }
 
         console.log('Backend response:', data);
-
-        if (data.handler === 'doGet') {
-          throw new Error(
-            'POST 요청이 doGet으로 처리되었습니다. ' +
-            'Apps Script 최신 코드로 새 버전 재배포 후 /exec URL을 다시 확인하세요.'
-          );
-        }
-
-        if (!data.ok) {
-          throw new Error(data.error || 'Backend error');
-        }
-
-        if (data.handler && data.handler !== 'doPost') {
-          throw new Error(
-            '예상하지 못한 백엔드 handler: ' + data.handler
-          );
-        }
 
         if (!data.result) {
           throw new Error(
