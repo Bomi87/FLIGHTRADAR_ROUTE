@@ -251,8 +251,17 @@
 
         <div class="sp"></div>
 
-        <label for="gpxCorridor">SkyVector GPX 기준 최대 이탈거리 (NM)</label>
-        <input id="gpxCorridor" type="number" value="15" min="5" max="100" step="5">
+        <div class="row">
+          <div>
+            <label for="gpxCorridor">SkyVector GPX 기준 최대 이탈거리 (NM)</label>
+            <input id="gpxCorridor" type="number" value="5" min="1" max="100" step="1">
+          </div>
+
+          <div>
+            <label for="refineSpacing">2차 waypoint 최소 간격 (NM)</label>
+            <input id="refineSpacing" type="number" value="30" min="5" max="100" step="5">
+          </div>
+        </div>
 
         <div class="sp"></div>
 
@@ -518,15 +527,16 @@
         }
 
         const gpxCorridorNm = numberValue('gpxCorridor');
+        const refineSpacingNm = numberValue('refineSpacing');
 
         btn.disabled = true;
         $('refineStatus').className = 'status muted';
         $('refineStatus').textContent =
-          '1차 Route와 SkyVector GPX를 비교해 튀는 waypoint 제거 중...';
+          '1차 Route와 SkyVector GPX를 비교해 튀는 waypoint 정리 중...';
 
         const preparedGpx = preparePolyline(parsedGpx);
 
-        const kept = [];
+        const corridorPassed = [];
         const removed = [];
 
         firstPassResult.waypoints.forEach(wp => {
@@ -538,7 +548,7 @@
             );
 
           if (match && match.distanceNm <= gpxCorridorNm) {
-            kept.push({
+            corridorPassed.push({
               ...wp,
               gpxDistanceNm: match.distanceNm,
               alongTrackNm: match.alongTrackNm
@@ -546,12 +556,103 @@
           } else {
             removed.push({
               identifier: wp.identifier,
+              reason:'GPX corridor',
               gpxDistanceNm: match ? match.distanceNm : null
             });
           }
         });
 
-        kept.sort((a,b) => a.alongTrackNm - b.alongTrackNm);
+        corridorPassed.sort(
+          (a,b) => a.alongTrackNm - b.alongTrackNm
+        );
+
+        // 같은 구간에 waypoint가 여러 개 있으면
+        // GPX 선에 가장 가까운 waypoint 하나만 대표로 선택한다.
+        const bins = new Map();
+
+        corridorPassed.forEach(wp => {
+          const bin =
+            Math.floor(wp.alongTrackNm / refineSpacingNm);
+
+          const old = bins.get(bin);
+
+          const score =
+            Number(wp.gpxDistanceNm || 0) * 2 +
+            Number(wp.crossTrackNm || 0);
+
+          const oldScore =
+            old
+              ? Number(old.gpxDistanceNm || 0) * 2 +
+                Number(old.crossTrackNm || 0)
+              : Infinity;
+
+          if (!old || score < oldScore) {
+            if (old) {
+              removed.push({
+                identifier:old.identifier,
+                reason:'same route segment',
+                gpxDistanceNm:old.gpxDistanceNm
+              });
+            }
+
+            bins.set(bin, wp);
+          } else {
+            removed.push({
+              identifier:wp.identifier,
+              reason:'same route segment',
+              gpxDistanceNm:wp.gpxDistanceNm
+            });
+          }
+        });
+
+        let kept =
+          [...bins.values()]
+            .sort((a,b) => a.alongTrackNm - b.alongTrackNm);
+
+        // 너무 가까운 연속 waypoint가 남으면 더 GPX에 가까운 쪽만 유지.
+        const cleaned = [];
+
+        kept.forEach(wp => {
+          const prev = cleaned[cleaned.length - 1];
+
+          if (!prev) {
+            cleaned.push(wp);
+            return;
+          }
+
+          const progress =
+            wp.alongTrackNm - prev.alongTrackNm;
+
+          if (progress < refineSpacingNm * 0.6) {
+            const wpScore =
+              Number(wp.gpxDistanceNm || 0) * 2 +
+              Number(wp.crossTrackNm || 0);
+
+            const prevScore =
+              Number(prev.gpxDistanceNm || 0) * 2 +
+              Number(prev.crossTrackNm || 0);
+
+            if (wpScore < prevScore) {
+              removed.push({
+                identifier:prev.identifier,
+                reason:'too close',
+                gpxDistanceNm:prev.gpxDistanceNm
+              });
+              cleaned[cleaned.length - 1] = wp;
+            } else {
+              removed.push({
+                identifier:wp.identifier,
+                reason:'too close',
+                gpxDistanceNm:wp.gpxDistanceNm
+              });
+            }
+            return;
+          }
+
+          cleaned.push(wp);
+        });
+
+        kept = cleaned;
 
         const refinedResult = {
           ...firstPassResult,
@@ -559,14 +660,15 @@
           removed,
           removedCount: removed.length,
           originalCount: firstPassResult.waypoints.length,
-          gpxCorridorNm
+          gpxCorridorNm,
+          refineSpacingNm
         };
 
         renderResult(refinedResult, '2차 보정 Route');
 
         $('refineStatus').className = 'status ok';
         $('refineStatus').textContent =
-          `2차 보정 완료 · ${removed.length}개 waypoint 제거`;
+          `2차 보정 완료 · ${removed.length}개 제거 · ${kept.length}개 유지`;
 
       } catch (err) {
         $('refineStatus').className = 'status err';
