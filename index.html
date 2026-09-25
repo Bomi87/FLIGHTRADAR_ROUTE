@@ -259,7 +259,7 @@
 
           <div>
             <label for="refineSpacing">2차 waypoint 최소 간격 (NM)</label>
-            <input id="refineSpacing" type="number" value="50" min="5" max="150" step="5">
+            <input id="refineSpacing" type="number" value="60" min="5" max="150" step="5">
           </div>
         </div>
 
@@ -268,12 +268,12 @@
         <div class="row">
           <div>
             <label for="turnPreserve">Turn 보존 기준 (deg)</label>
-            <input id="turnPreserve" type="number" value="15" min="0" max="90" step="5">
+            <input id="turnPreserve" type="number" value="10" min="0" max="90" step="5">
           </div>
 
           <div>
             <label for="detourRatio">Detour ratio 제거 기준</label>
-            <input id="detourRatio" type="number" value="1.20" min="1.01" max="2.00" step="0.01">
+            <input id="detourRatio" type="number" value="1.12" min="1.01" max="2.00" step="0.01">
           </div>
         </div>
 
@@ -515,8 +515,22 @@
         $('refineCard').hidden = false;
 
         $('runStatus').className = 'status ok';
+
+        const compareText =
+          Number.isFinite(Number(data.result.comparisonCount))
+            ? ` · 실제 거리 비교 ${Number(data.result.comparisonCount).toLocaleString()}회`
+            : '';
+
+        const ambiguousText =
+          Number(data.result.ambiguousSkipped || 0) > 0
+            ? ` · 동명이의 waypoint 제외 ${Number(data.result.ambiguousSkipped).toLocaleString()}건`
+            : '';
+
         $('runStatus').textContent =
-          '1차 Route 추출 완료. SkyVector Overlay 후 GPX RAW를 붙여넣어 2차 보정하세요.';
+          '1차 Route 추출 완료' +
+          compareText +
+          ambiguousText +
+          '. SkyVector Overlay 후 GPX RAW를 붙여넣어 2차 보정하세요.';
 
       } catch (err) {
         $('runStatus').className = 'status err';
@@ -610,6 +624,49 @@
               removed.push({
                 identifier:b.identifier,
                 reason:'detour',
+                detourRatio:ratio
+              });
+
+              detourCleaned.splice(i,1);
+              changed = true;
+              break;
+            }
+          }
+        }
+
+        // 2-B) 넓은 구간 우회 제거.
+        // 인접 3점만으로 잡히지 않는 큰 활 모양/지그재그를 위해
+        // A-B-C-D-E에서 가운데 C가 A-E 직선 대비 과도한 우회를 만들면 제거.
+        changed = true;
+        pass = 0;
+
+        while (changed && pass < 12 && detourCleaned.length >= 5) {
+          changed = false;
+          pass++;
+
+          for (let i=2; i<detourCleaned.length-2; i++) {
+            const a = detourCleaned[i-2];
+            const b = detourCleaned[i-1];
+            const c = detourCleaned[i];
+            const d = detourCleaned[i+1];
+            const e = detourCleaned[i+2];
+
+            const path =
+              distanceNm(a,b) +
+              distanceNm(b,c) +
+              distanceNm(c,d) +
+              distanceNm(d,e);
+
+            const direct = distanceNm(a,e);
+
+            if (direct < 1) continue;
+
+            const ratio = path / direct;
+
+            if (ratio > detourRatioLimit) {
+              removed.push({
+                identifier:c.identifier,
+                reason:'wide detour',
                 detourRatio:ratio
               });
 
