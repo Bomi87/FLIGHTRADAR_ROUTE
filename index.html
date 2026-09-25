@@ -172,12 +172,12 @@
   <div class="wrap">
       <h1>Track → Waypoint Route</h1>
       <div class="muted">
-        ADS-B/실제 항적 CSV를 기준으로 가까운 ENROUTE waypoint를 순서대로 추정합니다.
+        1차: CSV로 Route 추출 → 2차: SkyVector GPX RAW와 비교해 튀는 waypoint를 제거합니다.
       </div>
 
       <div class="grid">
         <section class="card">
-          <h2>1. Track CSV + SkyVector GPX RAW</h2>
+          <h2>1. Track CSV</h2>
 
           <label for="trackFile">Track CSV 파일</label>
           <input id="trackFile" type="file" accept=".csv,text/csv">
@@ -191,17 +191,10 @@
 
           <div id="fileStatus" class="status muted"></div>
 
-          <div class="sp"></div>
-
-          <label for="gpxRaw">SkyVector GPX RAW 붙여넣기</label>
-          <textarea id="gpxRaw"
-            placeholder="<?xml version=&quot;1.0&quot; ...> ... <rtept lat=&quot;...&quot; lon=&quot;...&quot;> ... </rtept> ... </gpx>"></textarea>
-
-          <div id="gpxStatus" class="status muted"></div>
         </section>
 
         <section class="card">
-          <h2>2. 추출 조건</h2>
+          <h2>2. 1차 Route 추출 조건</h2>
 
           <div class="row">
             <div>
@@ -231,14 +224,8 @@
 
           <div class="sp"></div>
 
-          <div>
-            <label for="gpxCorridor">SkyVector GPX 기준 최대 이탈거리 (NM)</label>
-            <input id="gpxCorridor" type="number" value="15" min="5" max="100" step="5">
-          </div>
 
-          <div class="sp"></div>
-
-          <button id="runBtn" type="button">Waypoint Route 추출</button>
+          <button id="runBtn" type="button">1차 Route 추출</button>
 
           <div id="runStatus" class="status muted"></div>
         </section>
@@ -246,8 +233,37 @@
 
       <div class="sp"></div>
 
+      <section class="card" id="refineCard" hidden>
+        <h2>3. SkyVector GPX로 2차 보정</h2>
+
+        <div class="muted">
+          1차 Route를 SkyVector에 Overlay한 뒤, SkyVector GPX RAW를 아래에 붙여넣으세요.
+          GPX 경로에서 너무 멀리 벗어난 waypoint만 제거합니다.
+        </div>
+
+        <div class="sp"></div>
+
+        <label for="gpxRaw">SkyVector GPX RAW 붙여넣기</label>
+        <textarea id="gpxRaw"
+          placeholder="<?xml version=&quot;1.0&quot; ...> ... <rtept lat=&quot;...&quot; lon=&quot;...&quot;> ... </rtept> ... </gpx>"></textarea>
+
+        <div id="gpxStatus" class="status muted"></div>
+
+        <div class="sp"></div>
+
+        <label for="gpxCorridor">SkyVector GPX 기준 최대 이탈거리 (NM)</label>
+        <input id="gpxCorridor" type="number" value="15" min="5" max="100" step="5">
+
+        <div class="sp"></div>
+
+        <button id="refineBtn" type="button">2차 Route 보정</button>
+        <div id="refineStatus" class="status muted"></div>
+      </section>
+
+      <div class="sp"></div>
+
       <section class="card" id="resultCard" hidden>
-        <h2>3. 추정 Route</h2>
+        <h2>4. Route 결과</h2>
 
         <div id="routeText" class="route">-</div>
 
@@ -303,6 +319,7 @@
 
     let parsedTrack = [];
     let parsedGpx = [];
+    let firstPassResult = null;
     let lastRouteText = '';
 
     $('trackFile').addEventListener('change', async () => {
@@ -371,15 +388,10 @@
           throw new Error('먼저 Track CSV를 선택하세요.');
         }
 
-        if (parsedGpx.length < 2) {
-          throw new Error('SkyVector GPX RAW를 붙여넣으세요.');
-        }
-
         const maxDistanceNm = numberValue('maxDistance');
         const minSpacingNm = numberValue('minSpacing');
         const minAltitudeFt = numberValue('minAltitude');
         const sampleSpacingNm = numberValue('sampleSpacing');
-        const gpxCorridorNm = numberValue('gpxCorridor');
 
         btn.disabled = true;
         $('runStatus').className = 'status muted';
@@ -409,12 +421,6 @@
           maxDistanceNm,
           minSpacingNm,
           sampleSpacingNm,
-          gpxCorridorNm,
-          referenceRoute: parsedGpx.map(p => ({
-            name:p.name,
-            lat:p.lat,
-            lon:p.lon
-          })),
           track: sampled.map(p => ({
             lat:p.lat,
             lon:p.lon,
@@ -480,14 +486,107 @@
           );
         }
 
-        renderResult(data.result);
+        firstPassResult = data.result;
+        renderResult(data.result, '1차 Route');
+
+        $('refineCard').hidden = false;
 
         $('runStatus').className = 'status ok';
-        $('runStatus').textContent = 'Route 추출 완료 · SkyVector GPX corridor 적용.';
+        $('runStatus').textContent =
+          '1차 Route 추출 완료. SkyVector Overlay 후 GPX RAW를 붙여넣어 2차 보정하세요.';
 
       } catch (err) {
         $('runStatus').className = 'status err';
         $('runStatus').textContent = err.message;
+
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+
+    $('refineBtn').addEventListener('click', async () => {
+      const btn = $('refineBtn');
+
+      try {
+        if (!firstPassResult || !Array.isArray(firstPassResult.waypoints)) {
+          throw new Error('먼저 1차 Route를 추출하세요.');
+        }
+
+        if (parsedGpx.length < 2) {
+          throw new Error('SkyVector GPX RAW를 붙여넣으세요.');
+        }
+
+        const gpxCorridorNm = numberValue('gpxCorridor');
+
+        btn.disabled = true;
+        $('refineStatus').className = 'status muted';
+        $('refineStatus').textContent =
+          '1차 Route와 SkyVector GPX를 비교해 튀는 waypoint 제거 중...';
+
+        const payload = {
+          action:'refineRoute',
+          gpxCorridorNm,
+          routeWaypoints:firstPassResult.waypoints.map(x => ({
+            identifier:x.identifier,
+            region:x.region || '',
+            slug:x.slug || '',
+            lat:x.lat,
+            lon:x.lon,
+            crossTrackNm:x.crossTrackNm,
+            alongTrackNm:x.alongTrackNm
+          })),
+          referenceRoute:parsedGpx.map(p => ({
+            name:p.name,
+            lat:p.lat,
+            lon:p.lon
+          }))
+        };
+
+        const requestUrl =
+          BACKEND_URL + '?_=' + Date.now();
+
+        const res = await fetch(requestUrl, {
+          method:'POST',
+          headers:{
+            'Content-Type':'text/plain;charset=utf-8'
+          },
+          body:JSON.stringify(payload),
+          cache:'no-store'
+        });
+
+        const raw = await res.text();
+
+        let data;
+        try {
+          data = JSON.parse(raw);
+        } catch (_) {
+          throw new Error(
+            '백엔드가 JSON이 아닌 응답을 반환했습니다.\n' +
+            raw.slice(0,500)
+          );
+        }
+
+        if (!data.ok) {
+          throw new Error(data.error || 'Backend error');
+        }
+
+        if (!data.result || !Array.isArray(data.result.waypoints)) {
+          throw new Error(
+            '2차 보정 결과 형식이 올바르지 않습니다: ' +
+            JSON.stringify(data).slice(0,500)
+          );
+        }
+
+        renderResult(data.result, '2차 보정 Route');
+
+        $('refineStatus').className = 'status ok';
+        $('refineStatus').textContent =
+          `2차 보정 완료 · ${data.result.removedCount || 0}개 waypoint 제거`;
+
+      } catch (err) {
+        $('refineStatus').className = 'status err';
+        $('refineStatus').textContent = err.message;
 
       } finally {
         btn.disabled = false;
@@ -511,13 +610,18 @@
       }
     });
 
-    function renderResult(r) {
+    function renderResult(r, title) {
       if (!r || !Array.isArray(r.waypoints)) {
         throw new Error('백엔드 Route 결과 형식이 올바르지 않습니다.');
       }
 
       lastRouteText =
         r.waypoints.map(x => x.identifier).join(' ');
+
+      const heading = $('resultCard').querySelector('h2');
+      if (heading) {
+        heading.textContent = title ? `4. ${title}` : '4. Route 결과';
+      }
 
       $('routeText').textContent =
         lastRouteText || '조건에 맞는 waypoint를 찾지 못했습니다.';
