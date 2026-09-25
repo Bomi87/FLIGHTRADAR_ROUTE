@@ -365,11 +365,16 @@
           }))
         };
 
-        const res = await fetch(BACKEND_URL, {
+        const requestUrl =
+          BACKEND_URL + '?_=' + Date.now();
+
+        const res = await fetch(requestUrl, {
           method:'POST',
-          headers:{'Content-Type':'text/plain;charset=utf-8'},
+          headers:{
+            'Content-Type':'text/plain;charset=utf-8'
+          },
           body:JSON.stringify(payload),
-          redirect:'follow'
+          cache:'no-store'
         });
 
         const raw = await res.text();
@@ -380,31 +385,44 @@
         } catch (_) {
           throw new Error(
             '백엔드가 JSON이 아닌 응답을 반환했습니다.\n' +
-            raw.slice(0,300)
+            raw.slice(0,500)
           );
         }
 
-if (!data.ok) {
-  throw new Error(data.error || 'Backend error');
-}
+        console.log('Backend response:', data);
 
-console.log('Backend response:', data);
+        if (data.handler === 'doGet') {
+          throw new Error(
+            'POST 요청이 doGet으로 처리되었습니다. ' +
+            'Apps Script 최신 코드로 새 버전 재배포 후 /exec URL을 다시 확인하세요.'
+          );
+        }
 
-if (!data.result) {
-  throw new Error(
-    '백엔드 응답에 result가 없습니다: ' +
-    JSON.stringify(data).slice(0,500)
-  );
-}
+        if (!data.ok) {
+          throw new Error(data.error || 'Backend error');
+        }
 
-if (!Array.isArray(data.result.waypoints)) {
-  throw new Error(
-    '백엔드 응답에 waypoints 배열이 없습니다: ' +
-    JSON.stringify(data.result).slice(0,500)
-  );
-}
+        if (data.handler && data.handler !== 'doPost') {
+          throw new Error(
+            '예상하지 못한 백엔드 handler: ' + data.handler
+          );
+        }
 
-renderResult(data.result);
+        if (!data.result) {
+          throw new Error(
+            '백엔드 응답에 result가 없습니다: ' +
+            JSON.stringify(data).slice(0,500)
+          );
+        }
+
+        if (!Array.isArray(data.result.waypoints)) {
+          throw new Error(
+            '백엔드 응답에 waypoints 배열이 없습니다: ' +
+            JSON.stringify(data.result).slice(0,500)
+          );
+        }
+
+        renderResult(data.result);
 
         $('runStatus').className = 'status ok';
         $('runStatus').textContent = 'Route 추출 완료.';
