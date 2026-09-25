@@ -259,7 +259,21 @@
 
           <div>
             <label for="refineSpacing">2차 waypoint 최소 간격 (NM)</label>
-            <input id="refineSpacing" type="number" value="30" min="5" max="100" step="5">
+            <input id="refineSpacing" type="number" value="50" min="5" max="150" step="5">
+          </div>
+        </div>
+
+        <div class="sp"></div>
+
+        <div class="row">
+          <div>
+            <label for="turnPreserve">Turn 보존 기준 (deg)</label>
+            <input id="turnPreserve" type="number" value="15" min="0" max="90" step="5">
+          </div>
+
+          <div>
+            <label for="detourRatio">Detour ratio 제거 기준</label>
+            <input id="detourRatio" type="number" value="1.20" min="1.01" max="2.00" step="0.01">
           </div>
         </div>
 
@@ -528,17 +542,20 @@
 
         const gpxCorridorNm = numberValue('gpxCorridor');
         const refineSpacingNm = numberValue('refineSpacing');
+        const turnPreserveDeg = numberValue('turnPreserve');
+        const detourRatioLimit = numberValue('detourRatio');
 
         btn.disabled = true;
         $('refineStatus').className = 'status muted';
         $('refineStatus').textContent =
-          '1차 Route와 SkyVector GPX를 비교해 튀는 waypoint 정리 중...';
+          'GPX corridor + 간격 + Turn + Detour 조건으로 Route 정리 중...';
 
         const preparedGpx = preparePolyline(parsedGpx);
 
         const corridorPassed = [];
         const removed = [];
 
+        // 1) GPX corridor 밖 waypoint 제거
         firstPassResult.waypoints.forEach(wp => {
           const match =
             nearestPointOnPolyline(
@@ -555,9 +572,9 @@
             });
           } else {
             removed.push({
-              identifier: wp.identifier,
+              identifier:wp.identifier,
               reason:'GPX corridor',
-              gpxDistanceNm: match ? match.distanceNm : null
+              gpxDistanceNm:match ? match.distanceNm : null
             });
           }
         });
@@ -566,109 +583,164 @@
           (a,b) => a.alongTrackNm - b.alongTrackNm
         );
 
-        // 같은 구간에 waypoint가 여러 개 있으면
-        // GPX 선에 가장 가까운 waypoint 하나만 대표로 선택한다.
-        const bins = new Map();
+        // 2) 큰 우회/지그재그 제거
+        //    (A-B + B-C) / A-C 가 기준보다 크면 B 제거.
+        let detourCleaned = [...corridorPassed];
+        let changed = true;
+        let pass = 0;
 
-        corridorPassed.forEach(wp => {
-          const bin =
-            Math.floor(wp.alongTrackNm / refineSpacingNm);
+        while (changed && pass < 12 && detourCleaned.length >= 3) {
+          changed = false;
+          pass++;
 
-          const old = bins.get(bin);
+          for (let i=1; i<detourCleaned.length-1; i++) {
+            const a = detourCleaned[i-1];
+            const b = detourCleaned[i];
+            const c = detourCleaned[i+1];
 
-          const score =
-            Number(wp.gpxDistanceNm || 0) * 2 +
-            Number(wp.crossTrackNm || 0);
+            const ab = distanceNm(a,b);
+            const bc = distanceNm(b,c);
+            const ac = distanceNm(a,c);
 
-          const oldScore =
-            old
-              ? Number(old.gpxDistanceNm || 0) * 2 +
-                Number(old.crossTrackNm || 0)
-              : Infinity;
+            if (ac < 1) continue;
 
-          if (!old || score < oldScore) {
-            if (old) {
+            const ratio = (ab + bc) / ac;
+
+            if (ratio > detourRatioLimit) {
               removed.push({
-                identifier:old.identifier,
-                reason:'same route segment',
-                gpxDistanceNm:old.gpxDistanceNm
+                identifier:b.identifier,
+                reason:'detour',
+                detourRatio:ratio
               });
+
+              detourCleaned.splice(i,1);
+              changed = true;
+              break;
             }
-
-            bins.set(bin, wp);
-          } else {
-            removed.push({
-              identifier:wp.identifier,
-              reason:'same route segment',
-              gpxDistanceNm:wp.gpxDistanceNm
-            });
           }
-        });
+        }
 
-        let kept =
-          [...bins.values()]
-            .sort((a,b) => a.alongTrackNm - b.alongTrackNm);
+        // 3) 너무 촘촘한 waypoint 정리
+        //    기본 50 NM 미만은 건너뛰되,
+        //    실제 방향 변화가 turnPreserveDeg 이상이면 유지.
+        const spaced = [];
 
-        // 너무 가까운 연속 waypoint가 남으면 더 GPX에 가까운 쪽만 유지.
-        const cleaned = [];
+        if (detourCleaned.length) {
+          spaced.push(detourCleaned[0]);
+        }
 
-        kept.forEach(wp => {
-          const prev = cleaned[cleaned.length - 1];
-
-          if (!prev) {
-            cleaned.push(wp);
-            return;
-          }
+        for (let i=1; i<detourCleaned.length-1; i++) {
+          const prev = spaced[spaced.length-1];
+          const curr = detourCleaned[i];
+          const next = detourCleaned[i+1];
 
           const progress =
-            wp.alongTrackNm - prev.alongTrackNm;
+            curr.alongTrackNm - prev.alongTrackNm;
 
-          if (progress < refineSpacingNm * 0.6) {
-            const wpScore =
-              Number(wp.gpxDistanceNm || 0) * 2 +
-              Number(wp.crossTrackNm || 0);
+          const turnDeg =
+            routeTurnAngleDeg(prev,curr,next);
 
-            const prevScore =
-              Number(prev.gpxDistanceNm || 0) * 2 +
-              Number(prev.crossTrackNm || 0);
+          if (
+            progress >= refineSpacingNm ||
+            turnDeg >= turnPreserveDeg
+          ) {
+            spaced.push(curr);
+          } else {
+            removed.push({
+              identifier:curr.identifier,
+              reason:'spacing',
+              spacingNm:progress,
+              turnDeg
+            });
+          }
+        }
 
-            if (wpScore < prevScore) {
-              removed.push({
-                identifier:prev.identifier,
-                reason:'too close',
-                gpxDistanceNm:prev.gpxDistanceNm
-              });
-              cleaned[cleaned.length - 1] = wp;
-            } else {
-              removed.push({
-                identifier:wp.identifier,
-                reason:'too close',
-                gpxDistanceNm:wp.gpxDistanceNm
-              });
-            }
-            return;
+        // 마지막 waypoint는 유지
+        if (detourCleaned.length >= 2) {
+          const last =
+            detourCleaned[detourCleaned.length-1];
+
+          const prev =
+            spaced[spaced.length-1];
+
+          if (!prev || prev.identifier !== last.identifier ||
+              Math.abs(prev.alongTrackNm-last.alongTrackNm) > 0.1) {
+            spaced.push(last);
+          }
+        }
+
+        // 4) 같은 50 NM 구간에 여전히 여러 waypoint가 남은 경우
+        //    Turn 보존점은 유지하고, 나머지는 GPX에 가까운 점 우선.
+        const finalKept = [];
+
+        for (let i=0; i<spaced.length; i++) {
+          const curr = spaced[i];
+
+          if (!finalKept.length) {
+            finalKept.push(curr);
+            continue;
           }
 
-          cleaned.push(wp);
-        });
+          const prev = finalKept[finalKept.length-1];
+          const progress =
+            curr.alongTrackNm - prev.alongTrackNm;
 
-        kept = cleaned;
+          if (progress >= refineSpacingNm * 0.65) {
+            finalKept.push(curr);
+            continue;
+          }
+
+          const next = spaced[i+1] || null;
+          const currTurn =
+            next ? routeTurnAngleDeg(prev,curr,next) : 0;
+
+          if (currTurn >= turnPreserveDeg) {
+            finalKept.push(curr);
+            continue;
+          }
+
+          const currScore =
+            Number(curr.gpxDistanceNm || 0) * 2 +
+            Number(curr.crossTrackNm || 0);
+
+          const prevScore =
+            Number(prev.gpxDistanceNm || 0) * 2 +
+            Number(prev.crossTrackNm || 0);
+
+          if (currScore < prevScore && finalKept.length > 1) {
+            removed.push({
+              identifier:prev.identifier,
+              reason:'dense segment'
+            });
+
+            finalKept[finalKept.length-1] = curr;
+          } else {
+            removed.push({
+              identifier:curr.identifier,
+              reason:'dense segment'
+            });
+          }
+        }
+
+        const kept = finalKept;
 
         const refinedResult = {
           ...firstPassResult,
-          waypoints: kept,
+          waypoints:kept,
           removed,
-          removedCount: removed.length,
-          originalCount: firstPassResult.waypoints.length,
+          removedCount:removed.length,
+          originalCount:firstPassResult.waypoints.length,
           gpxCorridorNm,
-          refineSpacingNm
+          refineSpacingNm,
+          turnPreserveDeg,
+          detourRatioLimit
         };
 
         renderResult(refinedResult, '2차 보정 Route');
 
         $('refineStatus').className = 'status ok';
         $('refineStatus').textContent =
-          `2차 보정 완료 · ${removed.length}개 제거 · ${kept.length}개 유지`;
+          `2차 보정 완료 · ${removed.length}개 제거 · ${kept.length}개 유지 · Corridor ${gpxCorridorNm} NM / Spacing ${refineSpacingNm} NM`;
 
       } catch (err) {
         $('refineStatus').className = 'status err';
@@ -931,6 +1003,39 @@
       while(d < -180) d += 360;
       return d;
     }
+
+    function initialBearingDeg(a,b) {
+      const lat1 = Number(a.lat) * Math.PI / 180;
+      const lat2 = Number(b.lat) * Math.PI / 180;
+      const dLon =
+        shortestLonDelta(a.lon,b.lon) * Math.PI / 180;
+
+      const y =
+        Math.sin(dLon) * Math.cos(lat2);
+
+      const x =
+        Math.cos(lat1) * Math.sin(lat2) -
+        Math.sin(lat1) *
+        Math.cos(lat2) *
+        Math.cos(dLon);
+
+      return (
+        Math.atan2(y,x) * 180 / Math.PI + 360
+      ) % 360;
+    }
+
+    function angleDifferenceDeg(a,b) {
+      let d = Math.abs(Number(a)-Number(b)) % 360;
+      if (d > 180) d = 360-d;
+      return d;
+    }
+
+    function routeTurnAngleDeg(a,b,c) {
+      const inbound = initialBearingDeg(a,b);
+      const outbound = initialBearingDeg(b,c);
+      return angleDifferenceDeg(inbound,outbound);
+    }
+
 
     function preparePolyline(points) {
       const cumulativeNm = [0];
